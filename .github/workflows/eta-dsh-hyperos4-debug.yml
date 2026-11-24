@@ -1,0 +1,559 @@
+name: Eta DSH preview and HyperOS debug
+on:
+  push:
+    branches: [eta-dsh-hyperos4-debug]
+    paths: [.github/workflows/eta-dsh-hyperos4-debug.yml]
+permissions:
+  contents: read
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Apply reviewed Eta source changes
+        shell: bash
+        run: |
+          sed -n '/^# ETA_PATCH_BEGIN$/,/^# ETA_PATCH_END$/{ /^# ETA_PATCH_BEGIN$/d; /^# ETA_PATCH_END$/d; s/^# //; p; }' .github/workflows/eta-dsh-hyperos4-debug.yml > "$RUNNER_TEMP/eta.patch"
+          echo '4a786b8fd589ec44e1e0c662d097bca82eb7eee9ce3854f150d2c52e505dff55  '"$RUNNER_TEMP/eta.patch" | sha256sum -c -
+          git apply --check --whitespace=error "$RUNNER_TEMP/eta.patch"
+          git apply --whitespace=error "$RUNNER_TEMP/eta.patch"
+      - uses: ./.github/actions/setup-build
+      - name: Build Debug APK
+        run: ./gradlew --no-daemon --no-configuration-cache :app:assembleDebug
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Eta-DSH-Preview-HyperOS4-Debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+      - name: Run unit tests
+        run: ./gradlew --no-daemon --no-configuration-cache :app:testDebugUnitTest
+# ETA_PATCH_BEGIN
+# diff --git a/app/src/main/kotlin/io/github/mangi/eta/agent/runtime/AgentExecutionService.kt b/app/src/main/kotlin/io/github/mangi/eta/agent/runtime/AgentExecutionService.kt
+# --- a/app/src/main/kotlin/io/github/mangi/eta/agent/runtime/AgentExecutionService.kt
+# +++ b/app/src/main/kotlin/io/github/mangi/eta/agent/runtime/AgentExecutionService.kt
+# @@ -12,6 +12,7 @@
+#  import android.os.Handler
+#  import android.os.IBinder
+#  import android.os.Looper
+# +import androidx.core.app.NotificationCompat
+#  import io.github.mangi.eta.R
+#  import io.github.mangi.eta.agent.overlay.AgentOverlayStatus
+#  import io.github.mangi.eta.agent.overlay.localizedText
+# @@ -121,10 +122,12 @@
+#          )
+#          val taskCount = if (activeRunCount > 0) activeRunCount else leases.count()
+#          val headline = executionHeadline(this, status, taskCount)
+# +        val summary = resources.getQuantityString(R.plurals.execution_summary, taskCount, taskCount)
+#          val builder = Notification.Builder(this, CHANNEL)
+#              .setSmallIcon(R.drawable.ic_notification)
+#              .setColor(BRAND_COLOR)
+#              .setContentTitle(headline)
+# +            .setContentText(summary)
+#              .setContentIntent(open)
+#              .setOngoing(true)
+#              .setOnlyAlertOnce(true)
+# @@ -135,7 +138,6 @@
+#                  .addAction(Notification.Action.Builder(null, getString(R.string.execution_action_stop), stop).build())
+#          } else {
+#              builder
+# -                .setContentText(resources.getQuantityString(R.plurals.execution_summary, taskCount, taskCount))
+#                  .addAction(Notification.Action.Builder(null, getString(R.string.execution_stop), stop).build())
+#          }
+#  
+# @@ -143,18 +145,19 @@
+#          // GUI 运行或虚拟屏微缩镜显示期间退回普通前台通知，避免顶部同时出现两个胶囊冲突。
+#          if (status != null && !suppressLiveUpdate && Build.VERSION.SDK_INT >= Build.VERSION_CODES.BAKLAVA) {
+#              builder
+# -                .setStyle(Notification.BigTextStyle().bigText(""))
+# +                .setStyle(Notification.BigTextStyle().bigText(summary))
+#                  .setShortCriticalText(status.shortText())
+#              if (startedAtSnapshot > 0L) {
+#                  builder
+#                      .setWhen(startedAtSnapshot)
+# -                    .setShowWhen(true)
+# -                    .setUsesChronometer(true)
+# +                    .setShowWhen(false)
+#              }
+#              // 请求方法从 API 36.1 才公开；标准 extra 也可供支持该协议的 API 36 系统读取。
+# -            builder.extras.putBoolean("android.requestPromotedOngoing", true)
+# -        } else if (status != null) {
+# -            builder.setContentText(resources.getQuantityString(R.plurals.execution_summary, taskCount, taskCount))
+# +            if (Build.VERSION.SDK_INT_FULL >= Build.VERSION_CODES_FULL.BAKLAVA_1) {
+# +                builder.setRequestPromotedOngoing(true)
+# +            } else {
+# +                builder.extras.putBoolean(NotificationCompat.EXTRA_REQUEST_PROMOTED_ONGOING, true)
+# +            }
+#          }
+#          return builder.build()
+#      }
+# @@ -168,6 +171,17 @@
+#          else -> getString(R.string.overlay_reasoning)
+#      }
+#  
+# +    private data class NotificationSignature(
+# +        val headline: String,
+# +        val statusClass: Class<*>?,
+# +        val conversationId: String,
+# +        val archivedSource: String,
+# +        val archivedKey: String,
+# +        val count: Int,
+# +        val startedAtEpochMs: Long,
+# +        val suppressLiveUpdate: Boolean,
+# +    )
+# +
+#      companion object {
+#          private const val CHANNEL = "eta_execution"
+#          private const val NOTIFICATION_ID = 1107
+# @@ -184,7 +198,7 @@
+#          private var currentArchivedKey: String = ""
+#          private var currentStartedAtEpochMs: Long = 0L
+#          private var suppressLiveUpdate: Boolean = false
+# -        private var publishedSignature: String? = null
+# +        private var publishedSignature: NotificationSignature? = null
+#  
+#          /**
+#           * Agent run 的当前状态，供通知与状态栏胶囊展示；null 表示没有 Agent run 在跑。
+# @@ -210,7 +224,10 @@
+#                  this.suppressLiveUpdate = suppressLiveUpdate
+#                  val count = if (activeRunCount > 0) activeRunCount else leases.count()
+#                  val headline = executionHeadline(context, status, count)
+# -                val signature = "$headline|$conversationId|$archivedSource|$archivedKey|$count|${status != null}|$suppressLiveUpdate"
+# +                val signature = NotificationSignature(
+# +                    headline, status?.javaClass, conversationId, archivedSource, archivedKey,
+# +                    count, startedAtEpochMs, suppressLiveUpdate,
+# +                )
+#                  if (signature == publishedSignature) return@post
+#                  publishedSignature = signature
+#                  instance?.takeIf { it.foregroundActive }?.refreshNotification()
+# diff --git a/app/src/main/kotlin/io/github/mangi/eta/data/repository/DshCatalogPreview.kt b/app/src/main/kotlin/io/github/mangi/eta/data/repository/DshCatalogPreview.kt
+# new file mode 100644
+# --- /dev/null
+# +++ b/app/src/main/kotlin/io/github/mangi/eta/data/repository/DshCatalogPreview.kt
+# @@ -0,0 +1,139 @@
+# +package io.github.mangi.eta.data.repository
+# +
+# +import io.github.mangi.eta.agent.model.AgentHttpClient
+# +import java.io.IOException
+# +import java.util.Locale
+# +import java.util.concurrent.TimeUnit
+# +import kotlin.coroutines.resume
+# +import kotlin.coroutines.resumeWithException
+# +import kotlinx.coroutines.suspendCancellableCoroutine
+# +import kotlinx.serialization.Serializable
+# +import kotlinx.serialization.json.Json
+# +import kotlinx.serialization.json.JsonElement
+# +import kotlinx.serialization.json.JsonObject
+# +import kotlinx.serialization.json.JsonPrimitive
+# +import okhttp3.Call
+# +import okhttp3.Callback
+# +import okhttp3.Request
+# +import okhttp3.Response
+# +
+# +internal object DshCatalogPreview {
+# +    private const val URL = "https://kingcharleslzy-ai.github.io/dsh-purge/index.json"
+# +    private const val MAX_BYTES = 256 * 1024
+# +    internal const val MAX_PREVIEW_PLUGINS = 24
+# +    private val json = Json { ignoreUnknownKeys = true }
+# +    private val client by lazy {
+# +        AgentHttpClient.client.newBuilder()
+# +            .followRedirects(false)
+# +            .followSslRedirects(false)
+# +            .retryOnConnectionFailure(false)
+# +            .connectTimeout(5, TimeUnit.SECONDS)
+# +            .readTimeout(5, TimeUnit.SECONDS)
+# +            .callTimeout(10, TimeUnit.SECONDS)
+# +            .build()
+# +    }
+# +
+# +    suspend fun load(): Catalog = suspendCancellableCoroutine { continuation ->
+# +        val call = client.newCall(Request.Builder().url(URL).header("Accept", "application/json").build())
+# +        continuation.invokeOnCancellation { call.cancel() }
+# +        call.enqueue(object : Callback {
+# +            override fun onFailure(call: Call, e: IOException) {
+# +                continuation.resumeWithException(e)
+# +            }
+# +
+# +            override fun onResponse(call: Call, response: Response) {
+# +                val catalog = try {
+# +                    response.use {
+# +                        if (!continuation.isActive) return
+# +                        if (!it.isSuccessful) throw IOException("DSH catalog HTTP ${it.code}")
+# +                        val type = it.body.contentType()
+# +                        if (type == null || type.type != "application" || type.subtype != "json") {
+# +                            throw IOException("DSH catalog response is not JSON")
+# +                        }
+# +                        // Limit decoded bytes even if the server omits or misstates Content-Length.
+# +                        val source = it.body.source()
+# +                        if (source.request(MAX_BYTES + 1L)) throw IOException("DSH catalog exceeds the size limit")
+# +                        parse(source.readByteArray().decodeToString(throwOnInvalidSequence = true))
+# +                    }
+# +                } catch (e: Exception) {
+# +                    continuation.resumeWithException(e)
+# +                    return
+# +                }
+# +                continuation.resume(catalog)
+# +            }
+# +        })
+# +    }
+# +
+# +    internal fun parse(raw: String): Catalog {
+# +        val index = json.decodeFromString<Index>(raw)
+# +        require(!index.format.isString && index.format.content == "1") { "Unsupported DSH catalog format" }
+# +        require(index.plugins.all { it.name.isNotBlank() }) { "Missing DSH plugin name" }
+# +        return Catalog(
+# +            title = localizedField(index.title),
+# +            description = localizedField(index.description),
+# +            pluginCount = index.plugins.size,
+# +            plugins = index.plugins.take(MAX_PREVIEW_PLUGINS).map {
+# +                Plugin(
+# +                    it.name.trim().take(120), localizedField(it.title),
+# +                    localizedField(it.description), it.versions.size,
+# +                )
+# +            },
+# +        )
+# +    }
+# +
+# +    private fun localizedField(value: JsonElement): Map<String, String> = when (value) {
+# +        is JsonPrimitive -> {
+# +            require(value.isString) { "Expected a DSH catalog text value" }
+# +            mapOf("und" to value.content)
+# +        }
+# +        is JsonObject -> value.mapValues { (_, text) ->
+# +            require(text is JsonPrimitive && text.isString) { "Expected a localized DSH catalog string" }
+# +            text.content
+# +        }
+# +        else -> throw IllegalArgumentException("Expected DSH catalog text")
+# +    }
+# +
+# +    internal fun localized(values: Map<String, String>, locale: Locale, limit: Int): String {
+# +        fun lookup(tag: String) = values.entries.firstOrNull {
+# +            it.key.equals(tag, ignoreCase = true) && it.value.isNotBlank()
+# +        }?.value
+# +        return (lookup(locale.toLanguageTag())
+# +            ?: lookup(locale.language)
+# +            ?: lookup("en")
+# +            ?: values.values.firstOrNull { it.isNotBlank() }).orEmpty().trim().take(limit)
+# +    }
+# +
+# +    internal data class Catalog(
+# +        val title: Map<String, String>,
+# +        val description: Map<String, String>,
+# +        val pluginCount: Int,
+# +        val plugins: List<Plugin>,
+# +    )
+# +
+# +    internal data class Plugin(
+# +        val name: String,
+# +        val title: Map<String, String>,
+# +        val description: Map<String, String>,
+# +        val versionCount: Int,
+# +    )
+# +
+# +    @Serializable
+# +    private data class Index(
+# +        val format: JsonPrimitive,
+# +        val title: JsonElement,
+# +        val description: JsonElement,
+# +        val plugins: List<Entry>,
+# +    )
+# +
+# +    @Serializable
+# +    private data class Entry(
+# +        val name: String,
+# +        val title: JsonElement,
+# +        val description: JsonElement,
+# +        val versions: List<Version>,
+# +    )
+# +
+# +    // Only count versions. Do not retain or resolve URLs, sources, or executable metadata.
+# +    @Serializable
+# +    private class Version
+# +}
+# diff --git a/app/src/main/kotlin/io/github/mangi/eta/ui/screens/skills/AgentSkillsScreen.kt b/app/src/main/kotlin/io/github/mangi/eta/ui/screens/skills/AgentSkillsScreen.kt
+# --- a/app/src/main/kotlin/io/github/mangi/eta/ui/screens/skills/AgentSkillsScreen.kt
+# +++ b/app/src/main/kotlin/io/github/mangi/eta/ui/screens/skills/AgentSkillsScreen.kt
+# @@ -82,6 +82,8 @@
+#      val userInstalled = installed.filter { it.canDeleteUserSkill }
+#      val removed = state.skills.filter { !it.installed }
+#  
+# +    val dshPreview = rememberDshCatalogSection()
+# +
+#      when (LocalUiStyle.current) {
+#          AppearanceUiStyle.COUI -> {
+#              CouiScaffoldPage(
+# @@ -227,6 +229,8 @@
+#                      )
+#                  }
+#  
+# +                DshCatalogSection(dshPreview)
+# +
+#                  CouiPageBottomSpacer()
+#              }
+#          }
+# @@ -429,6 +433,8 @@
+#                          )
+#                      }
+#                  }
+# +
+# +                item(key = "dsh-catalog-preview") { DshCatalogSection(dshPreview) }
+#              }
+#          }
+#      }
+# diff --git a/app/src/main/kotlin/io/github/mangi/eta/ui/screens/skills/DshCatalogSection.kt b/app/src/main/kotlin/io/github/mangi/eta/ui/screens/skills/DshCatalogSection.kt
+# new file mode 100644
+# --- /dev/null
+# +++ b/app/src/main/kotlin/io/github/mangi/eta/ui/screens/skills/DshCatalogSection.kt
+# @@ -0,0 +1,126 @@
+# +package io.github.mangi.eta.ui.screens.skills
+# +
+# +import androidx.compose.foundation.layout.padding
+# +import androidx.compose.runtime.Composable
+# +import androidx.compose.runtime.getValue
+# +import androidx.compose.runtime.mutableStateOf
+# +import androidx.compose.runtime.remember
+# +import androidx.compose.runtime.rememberCoroutineScope
+# +import androidx.compose.runtime.setValue
+# +import androidx.compose.ui.Modifier
+# +import androidx.compose.ui.platform.LocalConfiguration
+# +import androidx.compose.ui.res.pluralStringResource
+# +import androidx.compose.ui.res.stringResource
+# +import androidx.compose.ui.unit.dp
+# +import io.github.mangi.eta.R
+# +import io.github.mangi.eta.data.model.AppearanceUiStyle
+# +import io.github.mangi.eta.data.repository.DshCatalogPreview
+# +import io.github.mangi.eta.ui.app.LocalUiStyle
+# +import io.github.mangi.eta.ui.components.coui.CouiPreference
+# +import io.github.mangi.eta.ui.components.coui.CouiPreferenceGroup
+# +import java.io.IOException
+# +import kotlinx.coroutines.launch
+# +import top.yukonga.miuix.kmp.basic.BasicComponent
+# +import top.yukonga.miuix.kmp.basic.Card
+# +import top.yukonga.miuix.kmp.basic.InfiniteProgressIndicator
+# +import top.yukonga.miuix.kmp.basic.SmallTitle
+# +
+# +@Composable
+# +internal fun rememberDshCatalogSection(): DshCatalogSectionState {
+# +    val scope = rememberCoroutineScope()
+# +    var state by remember { mutableStateOf<DshPreviewState>(DshPreviewState.Idle) }
+# +    val onClick: () -> Unit = {
+# +        when (state) {
+# +            is DshPreviewState.Loaded -> state = DshPreviewState.Idle
+# +            DshPreviewState.Loading -> Unit
+# +            DshPreviewState.Idle, DshPreviewState.Failed -> {
+# +                state = DshPreviewState.Loading
+# +                scope.launch {
+# +                    state = try {
+# +                        DshPreviewState.Loaded(DshCatalogPreview.load())
+# +                    } catch (_: IOException) {
+# +                        DshPreviewState.Failed
+# +                    } catch (_: IllegalArgumentException) {
+# +                        DshPreviewState.Failed
+# +                    }
+# +                }
+# +            }
+# +        }
+# +    }
+# +    return DshCatalogSectionState(state, onClick)
+# +}
+# +
+# +@Composable
+# +internal fun DshCatalogSection(preview: DshCatalogSectionState) {
+# +    val state = preview.state
+# +    val loading = state == DshPreviewState.Loading
+# +    val catalog = (state as? DshPreviewState.Loaded)?.catalog
+# +    val locale = LocalConfiguration.current.locales[0]
+# +    val title = stringResource(R.string.dsh_catalog_title)
+# +    val actionId = when (state) {
+# +        DshPreviewState.Idle -> R.string.dsh_catalog_load
+# +        DshPreviewState.Loading -> R.string.dsh_catalog_loading
+# +        DshPreviewState.Failed -> R.string.dsh_catalog_retry
+# +        is DshPreviewState.Loaded -> R.string.dsh_catalog_hide
+# +    }
+# +    val action = stringResource(actionId)
+# +    val notice = stringResource(R.string.dsh_catalog_notice)
+# +    val rows = mutableListOf<Pair<String, String>>()
+# +    if (state == DshPreviewState.Failed) rows.add(stringResource(R.string.dsh_catalog_error) to "")
+# +    if (catalog != null) {
+# +        rows.add(
+# +            (DshCatalogPreview.localized(catalog.title, locale, 120).ifBlank { title }) to
+# +                DshCatalogPreview.localized(catalog.description, locale, 500),
+# +        )
+# +        for (plugin in catalog.plugins) {
+# +            val pluginTitle = DshCatalogPreview.localized(plugin.title, locale, 120).ifBlank { plugin.name }
+# +            val description = DshCatalogPreview.localized(plugin.description, locale, 500)
+# +            val versions = pluralStringResource(
+# +                R.plurals.dsh_catalog_versions, plugin.versionCount, plugin.versionCount,
+# +            )
+# +            val name = plugin.name.takeUnless { it == pluginTitle }.orEmpty()
+# +            rows.add(pluginTitle to listOf(name, description, versions).filter { it.isNotEmpty() }.joinToString("\n"))
+# +        }
+# +        if (catalog.pluginCount == 0) {
+# +            rows.add(stringResource(R.string.dsh_catalog_empty) to "")
+# +        } else if (catalog.pluginCount > catalog.plugins.size) {
+# +            rows.add(stringResource(R.string.dsh_catalog_truncated, catalog.plugins.size, catalog.pluginCount) to "")
+# +        }
+# +    }
+# +
+# +    when (LocalUiStyle.current) {
+# +        AppearanceUiStyle.COUI -> CouiPreferenceGroup(title = title) {
+# +            item {
+# +                CouiPreference(
+# +                    title = action, summary = notice, enabled = !loading,
+# +                    showChevron = false, onClick = preview.onClick,
+# +                    trailing = { if (loading) InfiniteProgressIndicator(size = 20.dp) },
+# +                )
+# +            }
+# +            rows.forEach { (rowTitle, summary) ->
+# +                item { CouiPreference(title = rowTitle, summary = summary.takeIf { it.isNotEmpty() }) }
+# +            }
+# +        }
+# +        AppearanceUiStyle.MIUIX -> {
+# +            SmallTitle(title)
+# +            Card(modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)) {
+# +                BasicComponent(
+# +                    title = action, summary = notice, enabled = !loading, onClick = preview.onClick,
+# +                    endActions = { if (loading) InfiniteProgressIndicator(size = 20.dp) },
+# +                )
+# +                rows.forEach { (rowTitle, summary) ->
+# +                    BasicComponent(title = rowTitle, summary = summary.takeIf { it.isNotEmpty() })
+# +                }
+# +            }
+# +        }
+# +    }
+# +}
+# +
+# +internal data class DshCatalogSectionState(val state: DshPreviewState, val onClick: () -> Unit)
+# +
+# +internal sealed interface DshPreviewState {
+# +    data object Idle : DshPreviewState
+# +    data object Loading : DshPreviewState
+# +    data object Failed : DshPreviewState
+# +    data class Loaded(val catalog: DshCatalogPreview.Catalog) : DshPreviewState
+# +}
+# diff --git a/app/src/main/res/values-b+zh+Hans/strings_dsh_catalog.xml b/app/src/main/res/values-b+zh+Hans/strings_dsh_catalog.xml
+# new file mode 100644
+# --- /dev/null
+# +++ b/app/src/main/res/values-b+zh+Hans/strings_dsh_catalog.xml
+# @@ -0,0 +1,15 @@
+# +<?xml version="1.0" encoding="UTF-8"?>
+# +<resources>
+# +    <string name="dsh_catalog_title">DSH 插件目录</string>
+# +    <string name="dsh_catalog_notice">第三方只读预览，仅适用于 DSH。此处列出的插件不是 Eta 技能。</string>
+# +    <string name="dsh_catalog_load">加载 DSH 预览</string>
+# +    <string name="dsh_catalog_loading">正在加载 DSH 预览…</string>
+# +    <string name="dsh_catalog_retry">重试 DSH 预览</string>
+# +    <string name="dsh_catalog_hide">隐藏 DSH 预览</string>
+# +    <string name="dsh_catalog_error">无法加载 DSH 目录，请稍后重试。</string>
+# +    <string name="dsh_catalog_empty">此目录中没有插件。</string>
+# +    <string name="dsh_catalog_truncated">显示 %2$d 个插件中的 %1$d 个。</string>
+# +    <plurals name="dsh_catalog_versions">
+# +        <item quantity="other">列出 %d 个版本</item>
+# +    </plurals>
+# +</resources>
+# diff --git a/app/src/main/res/values-b+zh+Hant/strings_dsh_catalog.xml b/app/src/main/res/values-b+zh+Hant/strings_dsh_catalog.xml
+# new file mode 100644
+# --- /dev/null
+# +++ b/app/src/main/res/values-b+zh+Hant/strings_dsh_catalog.xml
+# @@ -0,0 +1,15 @@
+# +<?xml version="1.0" encoding="UTF-8"?>
+# +<resources>
+# +    <string name="dsh_catalog_title">DSH 外掛目錄</string>
+# +    <string name="dsh_catalog_notice">第三方唯讀預覽，僅適用於 DSH。此處列出的外掛不是 Eta 技能。</string>
+# +    <string name="dsh_catalog_load">載入 DSH 預覽</string>
+# +    <string name="dsh_catalog_loading">正在載入 DSH 預覽…</string>
+# +    <string name="dsh_catalog_retry">重試 DSH 預覽</string>
+# +    <string name="dsh_catalog_hide">隱藏 DSH 預覽</string>
+# +    <string name="dsh_catalog_error">無法載入 DSH 目錄，請稍後重試。</string>
+# +    <string name="dsh_catalog_empty">此目錄中沒有外掛。</string>
+# +    <string name="dsh_catalog_truncated">顯示 %2$d 個外掛中的 %1$d 個。</string>
+# +    <plurals name="dsh_catalog_versions">
+# +        <item quantity="other">列出 %d 個版本</item>
+# +    </plurals>
+# +</resources>
+# diff --git a/app/src/main/res/values/strings_dsh_catalog.xml b/app/src/main/res/values/strings_dsh_catalog.xml
+# new file mode 100644
+# --- /dev/null
+# +++ b/app/src/main/res/values/strings_dsh_catalog.xml
+# @@ -0,0 +1,16 @@
+# +<?xml version="1.0" encoding="UTF-8"?>
+# +<resources>
+# +    <string name="dsh_catalog_title">DSH plugin catalog</string>
+# +    <string name="dsh_catalog_notice">Third-party, read-only preview for DSH only. These are not Eta Skills.</string>
+# +    <string name="dsh_catalog_load">Load DSH preview</string>
+# +    <string name="dsh_catalog_loading">Loading DSH preview…</string>
+# +    <string name="dsh_catalog_retry">Retry DSH preview</string>
+# +    <string name="dsh_catalog_hide">Hide DSH preview</string>
+# +    <string name="dsh_catalog_error">Could not load the DSH catalog. Try again later.</string>
+# +    <string name="dsh_catalog_empty">No plugins in this catalog.</string>
+# +    <string name="dsh_catalog_truncated">Showing %1$d of %2$d plugins.</string>
+# +    <plurals name="dsh_catalog_versions">
+# +        <item quantity="one">%d listed version</item>
+# +        <item quantity="other">%d listed versions</item>
+# +    </plurals>
+# +</resources>
+# diff --git a/app/src/test/kotlin/io/github/mangi/eta/data/repository/DshCatalogPreviewTest.kt b/app/src/test/kotlin/io/github/mangi/eta/data/repository/DshCatalogPreviewTest.kt
+# new file mode 100644
+# --- /dev/null
+# +++ b/app/src/test/kotlin/io/github/mangi/eta/data/repository/DshCatalogPreviewTest.kt
+# @@ -0,0 +1,56 @@
+# +package io.github.mangi.eta.data.repository
+# +
+# +import java.util.Locale
+# +import org.junit.Assert.assertEquals
+# +import org.junit.Assert.assertTrue
+# +import org.junit.Test
+# +
+# +class DshCatalogPreviewTest {
+# +    @Test
+# +    fun readsLocalizedMetadataAndCountsVersionsWithoutKeepingSources() {
+# +        val catalog = DshCatalogPreview.parse(INDEX)
+# +        val plugin = catalog.plugins.single()
+# +        assertEquals(1, catalog.pluginCount)
+# +        assertEquals("示例目录", DshCatalogPreview.localized(catalog.title, Locale.SIMPLIFIED_CHINESE, 120))
+# +        assertEquals("Sample catalog", DshCatalogPreview.localized(catalog.title, Locale.FRENCH, 120))
+# +        assertEquals("sample-plugin", plugin.name)
+# +        assertEquals("Regional title", DshCatalogPreview.localized(plugin.title, Locale.UK, 120))
+# +        assertEquals("<b>plain text</b>", DshCatalogPreview.localized(plugin.description, Locale.US, 500))
+# +        assertEquals(2, plugin.versionCount)
+# +    }
+# +
+# +    @Test
+# +    fun acceptsPlainTextPluginTitlesUsedByTheLiveIndex() {
+# +        val catalog = DshCatalogPreview.parse(INDEX.replace("{\"en\":\"Sample\",\"en-GB\":\"Regional title\"}", "\"Plain title\""))
+# +        assertEquals("Plain title", DshCatalogPreview.localized(catalog.plugins.single().title, Locale.UK, 120))
+# +    }
+# +
+# +    @Test
+# +    fun acceptsAnEmptyCatalogAndCapsTheVisibleList() {
+# +        assertTrue(DshCatalogPreview.parse(INDEX.replace(ENTRY, "")).plugins.isEmpty())
+# +        val count = DshCatalogPreview.MAX_PREVIEW_PLUGINS + 1
+# +        val catalog = DshCatalogPreview.parse(INDEX.replace(ENTRY, List(count) { ENTRY }.joinToString(",")))
+# +        assertEquals(count, catalog.pluginCount)
+# +        assertEquals(count - 1, catalog.plugins.size)
+# +    }
+# +
+# +    @Test
+# +    fun rejectsUnsupportedAndMalformedCatalogs() {
+# +        for (raw in listOf(
+# +            "<html>not JSON</html>",
+# +            INDEX.replace("\"format\":1", "\"format\":2"),
+# +            INDEX.replace("\"format\":1", "\"format\":\"1\""),
+# +            INDEX.replace("\"title\":{\"en\":\"Sample catalog\",\"zh\":\"示例目录\"}", "\"title\":42"),
+# +            INDEX.replace("\"versions\":[", "\"notVersions\":["),
+# +            INDEX.replace("sample-plugin", " "),
+# +        )) {
+# +            assertTrue("Expected rejection: $raw", runCatching { DshCatalogPreview.parse(raw) }
+# +                .exceptionOrNull() is IllegalArgumentException)
+# +        }
+# +    }
+# +
+# +    private companion object {
+# +        const val ENTRY = """{"name":"sample-plugin","title":{"en":"Sample","en-GB":"Regional title"},"description":{"en":"<b>plain text</b>"},"versions":[{"version":"1.0","source":{"url":"https://example.invalid/plugin"}},{"version":"2.0"}]}"""
+# +        const val INDEX = """{"format":1,"title":{"en":"Sample catalog","zh":"示例目录"},"description":{"en":"Metadata only"},"plugins":[$ENTRY]}"""
+# +    }
+# +}
+# ETA_PATCH_END
